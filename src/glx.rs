@@ -1,8 +1,22 @@
-use std::ffi::CStr;
+use core::panic;
+use std::{
+    borrow::BorrowMut,
+    convert::TryInto,
+    ffi::{CStr, CString},
+    fs::{self, File},
+    io::Read,
+    ptr::null,
+};
 
-use libc::{c_char, c_int, c_void};
+use libc::{c_char, c_int, c_void, dlerror, dlsym};
+use rand::Rng;
 
-use crate::{FALSE_GL_VERSION, NATIVE_GLX};
+use crate::{
+    gl_def::{
+        GL_COMPILE_STATUS, GL_FALSE, GL_FRAGMENT_SHADER, GL_INFO_LOG_LENGTH, GL_VERTEX_SHADER,
+    },
+    CALLS, FALSE_GL_VERSION, FRONT_GL, NATIVE_GL, NATIVE_GLX, PROGRAMS, REPLACED_PROGRAMS, SHADERS,
+};
 
 #[no_mangle]
 pub extern "C" fn glXGetFBConfigs(
@@ -95,6 +109,154 @@ pub extern "C" fn glXMakeCurrent(
 
 #[no_mangle]
 pub extern "C" fn glXSwapBuffers(display: *const c_void, drawable: *const c_void) {
+    // Issue all previous job
+    let mut calls = CALLS.write().unwrap();
+
+    for action in calls.iter() {
+        match action {
+            crate::Action::ClearColorRandomize => {
+                let mut rng = rand::thread_rng();
+                NATIVE_GL.with(|cell| {
+                    let gl = cell.borrow();
+                    gl.clear_color.unwrap()(
+                        rng.gen::<f32>(),
+                        rng.gen::<f32>(),
+                        rng.gen::<f32>(),
+                        1.0,
+                    );
+                })
+            }
+            crate::Action::ShaderReloading(old_shader) => {
+                // Read file
+                let shader_path = format!(
+                    "/home/vincent/Projects/probriquegl/shaders/shader_n{}.glsl",
+                    old_shader
+                );
+                let shader_source = fs::read_to_string(shader_path).unwrap() + "\0";
+
+                let ugly_source: *const *const i8 = &(shader_source.as_ptr() as *const i8);
+
+                NATIVE_GL.with(|gl_cell| {
+                    let gl = gl_cell.borrow();
+
+                    // Get type of shader to reload
+                    let shader_type = SHADERS.with(|shaders_cell| {
+                        let shaders = shaders_cell.borrow_mut();
+                        (*shaders.get(&old_shader).unwrap()).clone()
+                    });
+
+                    // Recreate a new shader
+                    let new_shader = gl.create_shader.unwrap()(shader_type);
+
+                    // Compile it!!!
+                    gl.shader_source.unwrap()(new_shader, 1, ugly_source, null());
+                    gl.compile_shader.unwrap()(new_shader);
+
+                    // Check it
+                    let mut result = GL_FALSE;
+                    gl.get_shader_iv.unwrap()(
+                        new_shader,
+                        GL_COMPILE_STATUS,
+                        &mut result as *mut c_int,
+                    );
+
+                    let mut length = GL_FALSE;
+                    gl.get_shader_iv.unwrap()(
+                        new_shader,
+                        GL_INFO_LOG_LENGTH,
+                        &mut length as *mut c_int,
+                    );
+                    length += 1;
+
+                    if result == GL_FALSE {
+                        let mut log: Vec<u8> = Vec::new();
+                        log.resize(length.try_into().unwrap(), 0);
+                        gl.get_shader_info_log.unwrap()(
+                            new_shader,
+                            length + 1,
+                            null(),
+                            log.as_ptr() as *const i8,
+                        );
+                        let log_str = String::from_utf8(log).unwrap();
+                        println!("{}", log_str);
+                        panic!("Unable to compile shader, stopping here.");
+                    }
+
+                    PROGRAMS.with(|programs_cell| {
+                        let mut program: i32 = 0;
+                        let mut programs = programs_cell.borrow_mut();
+
+                        let mut vertex_shader = 0;
+                        let mut fragment_shader = 0;
+
+                        if shader_type == GL_VERTEX_SHADER {
+                            for (p, detail) in programs.iter_mut() {
+                                if detail.old_vertex_shader == *old_shader {
+                                    program = (*p).clone();
+                                    
+                                    vertex_shader = new_shader;
+                                    fragment_shader = detail.fragment_shader;
+
+                                    gl.delete_shader.unwrap()(detail.vertex_shader);
+
+                                    detail.vertex_shader = new_shader;
+                                    break;
+                                }
+                            }
+                        } else if shader_type == GL_FRAGMENT_SHADER {
+                            for (p, detail) in programs.iter_mut() {
+                                if detail.old_fragment_shader == *old_shader {
+                                    program = (*p).clone();
+
+                                    vertex_shader = detail.vertex_shader;
+                                    fragment_shader = new_shader;
+
+                                    gl.delete_shader.unwrap()(detail.fragment_shader);
+
+                                    detail.fragment_shader = new_shader;
+
+                                    println!("Here my boy");
+                                    break;
+                                }
+                            }
+                        } else {
+                            panic!("Unknown GL_WTF_SHADER");
+                        }
+
+                        if program != 0 {
+                            let old_program = program;
+                            let new_program = gl.create_program.unwrap()();
+
+                            gl.attach_shader.unwrap()(new_program, vertex_shader);
+                            gl.attach_shader.unwrap()(new_program, fragment_shader);
+                            gl.link_program.unwrap()(new_program);
+
+                            // Delete previous program
+                            REPLACED_PROGRAMS.with(|cell| {
+                                if let Some(previous_program) =
+                                    cell.borrow_mut().insert(old_program, new_program)
+                                {
+                                    // gl.delete_program.unwrap()(previous_program);
+                                } else {
+                                    // gl.delete_program.unwrap()(program);
+                                }
+                            });
+
+                            println!(
+                                "Create new program {} that will replace {}",
+                                new_program, old_program
+                            );
+                        } else {
+                            panic!("GL_WTF_PROGRAM");
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    calls.clear();
+
     NATIVE_GLX.with(|glx_cell| {
         let glx = glx_cell.borrow();
 
@@ -163,15 +325,31 @@ fn get_proc_address(proc_name: *const i8) -> *const c_void {
 
         unsafe {
             let proc_str = CStr::from_ptr(proc_name).to_str().unwrap();
-            let proc_addr: *const c_void;
+            let mut proc_addr: *const c_void = null();
             if proc_str == "glXCreateContextAttribsARB" {
                 proc_addr = glXCreateContextAttribsARB as *const c_void;
             } else if proc_str == "glGetString" {
                 proc_addr = crate::gl::glGetString as *const c_void;
             } else {
-                proc_addr = glx.get_proc_address.unwrap()(proc_name);
+                // Check if we have it before asking glx
+                FRONT_GL.with(|lib_cell| {
+                    let lib = lib_cell.borrow();
+                    proc_addr = dlsym(*lib, proc_name);
+                    let error = dlerror();
+                    if !error.is_null() {
+                        if !proc_str.starts_with("glX") {
+                            /*println!(
+                                "TODO: Hook up `{}`.\n\t{}",
+                                proc_str,
+                                CStr::from_ptr(error).to_str().unwrap()
+                            );*/
+                        }
+                        // Sad, we don't have it yet, let's pass on
+                        proc_addr = glx.get_proc_address.unwrap()(proc_name);
+                    }
+                });
             }
-            println!("get_proc_address({}) = {:?}", proc_str, proc_addr);
+            // println!("get_proc_address({}) = {:?}", proc_str, proc_addr);
             return proc_addr;
         }
     })
