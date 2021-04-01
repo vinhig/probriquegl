@@ -1,10 +1,8 @@
 use core::panic;
 use std::{
-    borrow::BorrowMut,
     convert::TryInto,
-    ffi::{CStr, CString},
-    fs::{self, File},
-    io::Read,
+    ffi::CStr,
+    fs::{self},
     ptr::null,
 };
 
@@ -12,8 +10,10 @@ use libc::{c_char, c_int, c_void, dlerror, dlsym};
 use rand::Rng;
 
 use crate::{
+    gl_debug_message,
     gl_def::{
-        GL_COMPILE_STATUS, GL_FALSE, GL_FRAGMENT_SHADER, GL_INFO_LOG_LENGTH, GL_VERTEX_SHADER,
+        GL_COMPILE_STATUS, GL_DEBUG_OUTPUT, GL_FALSE, GL_FRAGMENT_SHADER, GL_INFO_LOG_LENGTH,
+        GL_VERTEX_SHADER,
     },
     CALLS, FALSE_GL_VERSION, FRONT_GL, NATIVE_GL, NATIVE_GLX, PROGRAMS, REPLACED_PROGRAMS, SHADERS,
 };
@@ -109,6 +109,19 @@ pub extern "C" fn glXMakeCurrent(
 
 #[no_mangle]
 pub extern "C" fn glXSwapBuffers(display: *const c_void, drawable: *const c_void) {
+    // Here, we're sure the opengl context is correctly setup, so do custom stuff here
+    // After context creation, register debug callback
+    NATIVE_GL.with(|gl_cell| {
+        let mut gl = gl_cell.borrow_mut();
+        if gl.first_time {
+            gl.first_time = false;
+
+            println!("Registering 'GL_DEBUG_OUTPUT'");
+
+            gl.enable.unwrap()(GL_DEBUG_OUTPUT);
+            gl.debug_message_callback.unwrap()(gl_debug_message as *const c_void, null());
+        }
+    });
     // Issue all previous job
     let mut calls = CALLS.write().unwrap();
 
@@ -193,7 +206,7 @@ pub extern "C" fn glXSwapBuffers(display: *const c_void, drawable: *const c_void
                             for (p, detail) in programs.iter_mut() {
                                 if detail.old_vertex_shader == *old_shader {
                                     program = (*p).clone();
-                                    
+
                                     vertex_shader = new_shader;
                                     fragment_shader = detail.fragment_shader;
 
@@ -233,13 +246,13 @@ pub extern "C" fn glXSwapBuffers(display: *const c_void, drawable: *const c_void
 
                             // Delete previous program
                             REPLACED_PROGRAMS.with(|cell| {
-                                if let Some(previous_program) =
-                                    cell.borrow_mut().insert(old_program, new_program)
-                                {
-                                    // gl.delete_program.unwrap()(previous_program);
-                                } else {
-                                    // gl.delete_program.unwrap()(program);
-                                }
+                                // if let Some(_) =
+                                cell.borrow_mut().insert(old_program, new_program)
+                                // {
+                                // gl.delete_program.unwrap()(previous_program);
+                                // } else {
+                                // gl.delete_program.unwrap()(program);
+                                // }
                             });
 
                             println!(
@@ -290,6 +303,8 @@ pub extern "C" fn glXCreateNewContext(
 ) -> *const c_void {
     NATIVE_GLX.with(|glx_cell| {
         let glx = glx_cell.borrow();
+
+        println!("Salut Salut");
 
         return glx.create_new_context.unwrap()(display, config, render_type, share_list, direct);
     })
@@ -426,17 +441,13 @@ pub extern "C" fn glXCreateContextAttribsARB(
 
         println!("From now on, we're officially using '{}'.", version);
     });
-
     NATIVE_GLX.with(|glx_cell| {
         let mut glx = glx_cell.borrow_mut();
         glx.init();
 
-        return glx.create_context_attribs_arb.unwrap()(
-            display,
-            config,
-            context,
-            direct,
-            attrib_list,
-        );
+        let context =
+            glx.create_context_attribs_arb.unwrap()(display, config, context, direct, attrib_list);
+
+        return context;
     })
 }

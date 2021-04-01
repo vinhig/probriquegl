@@ -11,10 +11,11 @@ use std::{
     fs::File,
     io::{self, stdin, stdout, Read, Write},
     process::exit,
-    ptr::null_mut,
+    ptr::{null, null_mut},
     sync::{Arc, Mutex, RwLock},
 };
 
+use gl_def::GL_DEBUG_OUTPUT;
 use libc::{c_char, c_float, c_int, c_uint, c_void, dlerror, dlopen, dlsym};
 use rand::Rng;
 
@@ -60,7 +61,10 @@ pub struct Glx {
 pub struct Gl {
     pub handle: *mut c_void,
     pub ready: bool,
+    pub first_time: bool,
 
+    pub enable: Option<fn(c_int)>,
+    pub debug_message_callback: Option<fn(*const c_void, *const c_void)>,
     pub get_string: Option<fn(c_uint) -> *const c_char>,
     pub clear: Option<fn(c_uint)>,
     pub clear_color: Option<fn(c_float, c_float, c_float, c_float)>,
@@ -76,6 +80,23 @@ pub struct Gl {
     pub get_shader_iv: Option<fn(c_int, c_uint, *const c_int)>,
     pub get_shader_info_log: Option<fn(c_int, c_int, *const c_int, *const c_char)>,
     pub program_parameter: Option<fn(c_int, c_uint, c_int)>,
+}
+
+extern "system" fn gl_debug_message(
+    _source: c_uint,
+    _type: c_uint,
+    _id: c_uint,
+    _sev: c_uint,
+    _len: i32,
+    message: *mut c_char,
+    _param: *mut c_void,
+) {
+    if _type == 0x824C {
+        unsafe {
+            let s = CStr::from_ptr(message);
+            println!("OpenGL Debug message: {}", s.to_str().unwrap());
+        }
+    }
 }
 
 fn load_fn(handle: *mut c_void, function: &str) -> *const c_void {
@@ -208,6 +229,13 @@ impl Gl {
     pub fn init(&mut self, handle: *mut c_void) {
         if !self.ready {
             self.handle = handle;
+            self.enable = unsafe { std::mem::transmute(load_fn(handle, "glEnable")) };
+            self.debug_message_callback =
+                unsafe { std::mem::transmute(load_fn(handle, "glDebugMessageCallback")) };
+
+            // I'm putting that as a reminder lmao
+            // -> Setup GL_DEBUG_OUTPUT must be done after context creation
+
             self.get_string = unsafe { std::mem::transmute(load_fn(handle, "glGetString")) };
             self.clear_color = unsafe { std::mem::transmute(load_fn(handle, "glClearColor")) };
             self.clear = unsafe { std::mem::transmute(load_fn(handle, "glClear")) };
@@ -273,6 +301,9 @@ thread_local! {
     pub static NATIVE_GL: RefCell<Gl> = RefCell::new(Gl {
         handle: null_mut(),
         ready: false,
+        first_time: true,
+        enable: None,
+        debug_message_callback: None,
         get_string: None,
         clear: None,
         clear_color: None,

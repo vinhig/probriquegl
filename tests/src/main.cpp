@@ -68,8 +68,9 @@ int main() {
 
   gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
 
-  glEnable(GL_DEBUG_OUTPUT);
-  glDebugMessageCallback(OglDebugOutput, nullptr);
+  printf("Enabling from app...\n");
+  // glEnable(GL_DEBUG_OUTPUT);
+  // glDebugMessageCallback(OglDebugOutput, nullptr);
 
   printf("-----> %s\n", glGetString(GL_VERSION));
 
@@ -161,6 +162,8 @@ int main() {
 
   // Set color used to draw screen
   glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+
+  GL_DEBUG_TYPE_ERROR
 
   // Game loop
   while (!glfwWindowShouldClose(window)) {
