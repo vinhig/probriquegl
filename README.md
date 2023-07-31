@@ -1,1 +1,1 @@
-It kinda works, but no time nor motivation to work on it.
+If you want to see how it works: https://vinhig.github.io/posts/hijack-opengl-calls-from-civ6/
